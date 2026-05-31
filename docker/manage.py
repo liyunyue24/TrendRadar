@@ -21,8 +21,8 @@ def get_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def run_command(cmd, shell=True, capture_output=True):
-    """执行系统命令"""
+def run_command(cmd, shell=False, capture_output=True):
+    """执行系统命令（cmd 应为列表形式，如 ['ls', '-l']）"""
     try:
         result = subprocess.run(
             cmd, shell=shell, capture_output=capture_output, text=True
@@ -311,9 +311,9 @@ def show_config():
     for var in env_vars:
         value = os.environ.get(var, "未设置")
         # 隐藏敏感信息
-        if any(sensitive in var for sensitive in ["WEBHOOK", "TOKEN", "KEY", "SECRET"]):
+        if any(sensitive in var for sensitive in ["WEBHOOK", "TOKEN", "KEY", "SECRET", "PASSWORD"]):
             if value and value != "未设置":
-                masked_value = value[:10] + "***" if len(value) > 10 else "***"
+                masked_value = value[:4] + "***" + value[-2:] if len(value) > 8 else "***"
                 print(f"  {var}: {masked_value}")
             else:
                 print(f"  {var}: {value}")

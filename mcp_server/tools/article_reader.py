@@ -6,8 +6,10 @@
 
 """
 
+import ipaddress
 import time
 from typing import Dict, List
+from urllib.parse import urlparse
 
 import requests
 
@@ -47,6 +49,30 @@ class ArticleReaderTools:
             headers["Authorization"] = f"Bearer {self.jina_api_key}"
         return headers
 
+    @staticmethod
+    def _is_safe_url(url: str) -> bool:
+        """Check that URL does not target private/internal networks (SSRF protection)"""
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+            if not hostname:
+                return False
+
+            # Block common internal hostnames
+            if hostname in ("localhost", "metadata.google.internal"):
+                return False
+
+            # Resolve and check IP address
+            import socket
+            resolved = socket.getaddrinfo(hostname, None)
+            for family, _, _, _, sockaddr in resolved:
+                ip = ipaddress.ip_address(sockaddr[0])
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                    return False
+        except Exception:
+            return False
+        return True
+
     def _throttle(self):
         """速率控制：确保请求间隔 5 秒"""
         now = time.time()
@@ -75,6 +101,12 @@ class ArticleReaderTools:
                 raise InvalidParameterError(
                     f"无效的 URL: {url}",
                     suggestion="URL 必须以 http:// 或 https:// 开头"
+                )
+
+            if not self._is_safe_url(url):
+                raise InvalidParameterError(
+                    f"URL 指向内部/私有网络，已拒绝: {url}",
+                    suggestion="仅允许公网地址"
                 )
 
             self._throttle()

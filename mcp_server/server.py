@@ -1117,7 +1117,7 @@ async def send_notification(
 def run_server(
     project_root: Optional[str] = None,
     transport: str = 'stdio',
-    host: str = '0.0.0.0',
+    host: str = '127.0.0.1',
     port: int = 3333
 ):
     """
@@ -1126,7 +1126,7 @@ def run_server(
     Args:
         project_root: 项目根目录路径
         transport: 传输模式，'stdio' 或 'http'
-        host: HTTP模式的监听地址，默认 0.0.0.0
+        host: HTTP模式的监听地址，默认 127.0.0.1
         port: HTTP模式的监听端口，默认 3333
     """
     # 初始化工具实例
@@ -1233,8 +1233,8 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--host',
-        default='0.0.0.0',
-        help='HTTP模式的监听地址，默认 0.0.0.0'
+        default='127.0.0.1',
+        help='HTTP模式的监听地址，默认 127.0.0.1（仅本地访问），如需外部访问请显式指定 0.0.0.0'
     )
     parser.add_argument(
         '--port',
