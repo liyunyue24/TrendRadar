@@ -10,6 +10,12 @@ on:
   pull_request_review_comment:
     types: [created]
 
+# Prevent queued deadlock: only one run per issue/PR at a time.
+# New events cancel the in-progress run so the latest state is always used.
+concurrency:
+  group: issue-guard-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   moderate:
     runs-on: ubuntu-latest
@@ -23,6 +29,8 @@ jobs:
 
       # AI 内容审核（垃圾检测 + 链接检测 + AI 生成检测）
       - uses: github/ai-moderator@v1
+        id: ai-moderator
+        continue-on-error: true
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           spam-label: 'spam'
@@ -31,6 +39,12 @@ jobs:
           enable-spam-detection: true
           enable-link-spam-detection: true
           enable-ai-detection: true
+
+      # Allow ai-moderator state (labels, minimized flags) to propagate
+      # through GitHub's eventually-consistent API before querying it.
+      - name: Wait for AI moderator state propagation
+        if: steps.ai-moderator.outcome == 'success'
+        run: sleep 5
 
       # 两层防护：
       # 1) 账号 < 7 天 → 直接删除/关闭
@@ -85,8 +99,14 @@ jobs:
             }
 
             // 获取账号年龄
-            const { data: user } = await github.rest.users.getByUsername({ username });
-            const accountAgeDays = Math.floor((Date.now() - new Date(user.created_at)) / 86400000);
+            let accountAgeDays;
+            try {
+              const { data: user } = await github.rest.users.getByUsername({ username });
+              accountAgeDays = Math.floor((Date.now() - new Date(user.created_at)) / 86400000);
+            } catch (err) {
+              core.warning(`Failed to fetch user info for ${username}: ${err.message}`);
+              return;
+            }
             const isNewAccount = accountAgeDays < MIN_ACCOUNT_AGE_DAYS;
 
             // 判断是否需要拦截
@@ -100,22 +120,26 @@ jobs:
             } else {
               // 第二层：老账号检查 AI 垃圾判定
               let isSpam = false;
-              if (isComment) {
-                const { node } = await github.graphql(`
-                  query($id: ID!) {
-                    node(id: $id) {
-                      ... on IssueComment { isMinimized }
-                      ... on PullRequestReviewComment { isMinimized }
+              try {
+                if (isComment) {
+                  const { node } = await github.graphql(`
+                    query($id: ID!) {
+                      node(id: $id) {
+                        ... on IssueComment { isMinimized }
+                        ... on PullRequestReviewComment { isMinimized }
+                      }
                     }
-                  }
-                `, { id: nodeId });
-                isSpam = node?.isMinimized === true;
-              } else {
-                const { data: labels } = await github.rest.issues.listLabelsOnIssue({
-                  ...context.repo,
-                  issue_number: number
-                });
-                isSpam = labels.some(l => l.name === 'spam');
+                  `, { id: nodeId });
+                  isSpam = node?.isMinimized === true;
+                } else {
+                  const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+                    ...context.repo,
+                    issue_number: number
+                  });
+                  isSpam = labels.some(l => l.name === 'spam');
+                }
+              } catch (err) {
+                core.warning(`Failed to check spam status: ${err.message}`);
               }
 
               if (isSpam) {
@@ -155,47 +179,52 @@ jobs:
                 ].join('\n');
 
             // 执行拦截操作
-            if (isComment) {
-              // 评论：直接删除
-              if (isIssue) {
-                await github.rest.issues.deleteComment({
+            try {
+              if (isComment) {
+                // 评论：直接删除
+                if (isIssue) {
+                  await github.rest.issues.deleteComment({
+                    ...context.repo,
+                    comment_id: commentId
+                  });
+                } else {
+                  await github.rest.pulls.deleteReviewComment({
+                    ...context.repo,
+                    comment_id: commentId
+                  });
+                }
+              } else if (isIssue) {
+                // 新建 Issue：评论提示 → 关闭 → 锁定
+                await github.rest.issues.createComment({
                   ...context.repo,
-                  comment_id: commentId
+                  issue_number: number,
+                  body: notice
                 });
-              } else {
-                await github.rest.pulls.deleteReviewComment({
+                await github.rest.issues.update({
                   ...context.repo,
-                  comment_id: commentId
+                  issue_number: number,
+                  state: 'closed',
+                  state_reason: 'not_planned'
+                });
+                await github.rest.issues.lock({
+                  ...context.repo,
+                  issue_number: number,
+                  lock_reason: 'spam'
+                });
+              } else if (isPR) {
+                // 新建 PR：评论提示 → 关闭
+                await github.rest.issues.createComment({
+                  ...context.repo,
+                  issue_number: number,
+                  body: notice
+                });
+                await github.rest.pulls.update({
+                  ...context.repo,
+                  pull_number: number,
+                  state: 'closed'
                 });
               }
-            } else if (isIssue) {
-              // 新建 Issue：评论提示 → 关闭 → 锁定
-              await github.rest.issues.createComment({
-                ...context.repo,
-                issue_number: number,
-                body: notice
-              });
-              await github.rest.issues.update({
-                ...context.repo,
-                issue_number: number,
-                state: 'closed',
-                state_reason: 'not_planned'
-              });
-              await github.rest.issues.lock({
-                ...context.repo,
-                issue_number: number,
-                lock_reason: 'spam'
-              });
-            } else if (isPR) {
-              // 新建 PR：评论提示 → 关闭
-              await github.rest.issues.createComment({
-                ...context.repo,
-                issue_number: number,
-                body: notice
-              });
-              await github.rest.pulls.update({
-                ...context.repo,
-                pull_number: number,
-                state: 'closed'
-              });
+            } catch (err) {
+              core.warning(`Failed to execute block action: ${err.message}`);
+              throw err;
             }
